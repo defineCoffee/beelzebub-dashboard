@@ -17,3 +17,4 @@ services:
       OPEN_AI_SECRET_KEY: ${OPEN_AI_SECRET_KEY}
     volumes:
       - "./configurations:/configurations"
+      - "./logs:/logs"
