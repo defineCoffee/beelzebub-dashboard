@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +18,11 @@ var (
 )
 
 func main() {
+	// allow overriding log path via env var for flexibility
+	if p := os.Getenv("BEELZEBUB_LOG_PATH"); p != "" {
+		logPath = p
+	}
+
 	go watchLogFile()
 
 	http.HandleFunc("/logs", logsHandler)
@@ -24,31 +30,59 @@ func main() {
 		http.ServeFile(w, r, "index.html")
 	})
 
-	http.ListenAndServe(":8090", nil) // Change port if needed
+	if err := http.ListenAndServe(":8090", nil); err != nil {
+		panic(err)
+	}
 }
 
 func watchLogFile() {
-	f, err := os.Open(logPath)
-	if err != nil {
-		panic(err)
-	}
-	defer f.Close()
-	f.Seek(0, 2) // go to end
-
-	reader := bufio.NewReader(f)
 	for {
-		line, err := reader.ReadString('\n')
+		f, err := os.Open(logPath)
 		if err != nil {
+			// file may not exist yet; keep retrying
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		mu.Lock()
-		logsBuffer = append(logsBuffer, line)
-		if len(logsBuffer) > 1000 {
-			logsBuffer = logsBuffer[len(logsBuffer)-1000:]
+		reader := bufio.NewReader(f)
+		offset := int64(0)
+
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == os.ErrClosed {
+					break
+				}
+				// EOF means file is still being written to; check for truncation/rotation
+				if err == io.EOF {
+					stat, statErr := f.Stat()
+					if statErr == nil && stat.Size() < offset {
+						// file rotated/truncated; reopen it
+						break
+					}
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+				// unexpected error, restart watcher
+				break
+			}
+
+			offset += int64(len(line))
+			appendLogLine(line)
 		}
-		mu.Unlock()
+
+		f.Close()
+		// brief pause before retrying to avoid hot loop
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func appendLogLine(line string) {
+	mu.Lock()
+	defer mu.Unlock()
+	logsBuffer = append(logsBuffer, line)
+	if len(logsBuffer) > 1000 {
+		logsBuffer = logsBuffer[len(logsBuffer)-1000:]
 	}
 }
 

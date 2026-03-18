@@ -5,40 +5,228 @@
     <style>
         body { font-family: Arial; }
         table { border-collapse: collapse; width: 100%; }
-        td, th { border: 1px solid #ddd; padding: 8px; }
+        td, th { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+        #controls { margin-bottom: 10px; }
+        #controls label { margin-right: 10px; display: inline-block; }
+        pre { margin: 0; font-size: smaller; }
     </style>
 </head>
 <body>
-    <h1>Beelzebub Live Logs</h1>
+    <h1>Beelzebub Logs</h1>
+    <button id="toggleControls">Show Field Visibility</button>
+    <div id="controls" style="display: none;"></div>
+    <div id="pagination" style="margin-bottom:10px;"></div>
     <table id="logTable">
         <thead>
-            <tr>
-                <th>Timestamp</th><th>Level</th><th>Message</th>
-            </tr>
+            <tr></tr>
         </thead>
         <tbody></tbody>
     </table>
     <script>
+        // Helper to flatten object keys recursively
+        function collectKeys(obj, prefix = '') {
+            let keys = [];
+            for (let key in obj) {
+                let fullKey = prefix ? `${prefix}.${key}` : key;
+                if (typeof obj[key] === 'object' && obj[key] !== null && !Array.isArray(obj[key])) {
+                    keys.push(...collectKeys(obj[key], fullKey));
+                } else {
+                    keys.push(fullKey);
+                }
+            }
+            return keys;
+        }
+
+        // Helper to get nested value
+        function getValue(obj, path) {
+            return path.split('.').reduce((o, k) => o && o[k], obj);
+        }
+
+        // Keep track of column visibility between refreshes
+        const columnVisibility = {};
+        const PAGE_SIZE = 20;
+        let currentPage = 1;
+
         // periodically fetch logs
         function fetchLogs() {
             fetch("/logs")
                 .then(resp => resp.json())
                 .then(logs => {
                     let tbody = document.querySelector("#logTable tbody");
+                    let thead = document.querySelector("#logTable thead tr");
+                    let controls = document.querySelector("#controls");
+                    let pagination = document.querySelector("#pagination");
                     tbody.innerHTML = '';
-                    logs.slice(-50).reverse().forEach(x => { // show last 50
-                        let tr = document.createElement("tr");
-                        tr.innerHTML = `
-                            <td>${x["@timestamp"]||""}</td>
-                            <td>${x["log.level"]||""}</td>
-                            <td>${x["message"]||""}</td>
-                        `;
-                        tbody.append(tr);
+                    thead.innerHTML = '';
+                    controls.innerHTML = '';
+                    pagination.innerHTML = '';
+                    
+                    // Collect all unique flattened keys in order of first appearance
+                    let allKeys = [];
+                    logs.forEach(log => {
+                        let logKeys = collectKeys(log);
+                        logKeys.forEach(key => {
+                            if (!allKeys.includes(key)) allKeys.push(key);
+                        });
                     });
-                });
+                    
+                    // Prioritize timestamp fields first
+                    let keys = allKeys;
+                    const timestampKeys = ['@timestamp', 'timestamp', 'time'];
+                    for (let tsKey of timestampKeys) {
+                        if (keys.includes(tsKey)) {
+                            keys = [tsKey, ...keys.filter(k => k !== tsKey)];
+                            break;
+                        }
+                    }
+
+                    // Pagination
+                    const totalLogs = logs.length;
+                    const totalPages = Math.max(1, Math.ceil(totalLogs / PAGE_SIZE));
+                    if (currentPage > totalPages) currentPage = totalPages;
+                    const end = totalLogs - (currentPage - 1) * PAGE_SIZE;
+                    const start = Math.max(0, end - PAGE_SIZE);
+                    const pageLogs = logs.slice(start, end);
+
+                    // Render pagination controls
+                    const prevBtn = document.createElement('button');
+                    prevBtn.textContent = 'Previous';
+                    prevBtn.disabled = currentPage <= 1;
+                    prevBtn.addEventListener('click', () => {
+                        if (currentPage > 1) {
+                            currentPage -= 1;
+                            fetchLogs();
+                        }
+                    });
+
+                    const nextBtn = document.createElement('button');
+                    nextBtn.textContent = 'Next';
+                    nextBtn.disabled = currentPage >= totalPages;
+                    nextBtn.addEventListener('click', () => {
+                        if (currentPage < totalPages) {
+                            currentPage += 1;
+                            fetchLogs();
+                        }
+                    });
+
+                    const info = document.createElement('span');
+                    info.textContent = `Page ${currentPage}/${totalPages} (showing ${pageLogs.length} of ${totalLogs})`;
+                    info.style.margin = '0 10px';
+
+                    pagination.appendChild(prevBtn);
+                    pagination.appendChild(info);
+                    pagination.appendChild(nextBtn);
+
+                    // Ensure visibility defaults
+                    keys.forEach(key => {
+                        if (!(key in columnVisibility)) {
+                            columnVisibility[key] = true;
+                        }
+                    });
+
+                    // Helper to apply current visibility state
+                    function applyVisibility() {
+                        // Update all checkboxes
+                        document.querySelectorAll("#controls input[type=checkbox]").forEach(cb => {
+                            const k = cb.dataset.key;
+                            if (k in columnVisibility) {
+                                cb.checked = Boolean(columnVisibility[k]);
+                            }
+                        });
+                        // Update table columns
+                        keys.forEach((key, idx) => {
+                            const visible = Boolean(columnVisibility[key]);
+                            let th = thead.children[idx];
+                            if (th) th.style.display = visible ? '' : 'none';
+                            let tds = tbody.querySelectorAll(`td:nth-child(${idx + 1})`);
+                            tds.forEach(td => td.style.display = visible ? '' : 'none');
+                        });
+                    }
+
+                    // Select / Deselect buttons
+                    let selectAllBtn = document.createElement("button");
+                    selectAllBtn.textContent = "Select all";
+                    selectAllBtn.addEventListener("click", () => {
+                        keys.forEach(k => columnVisibility[k] = true);
+                        applyVisibility();
+                    });
+                    let deselectAllBtn = document.createElement("button");
+                    deselectAllBtn.textContent = "Deselect all";
+                    deselectAllBtn.addEventListener("click", () => {
+                        keys.forEach(k => columnVisibility[k] = false);
+                        applyVisibility();
+                    });
+                    controls.appendChild(selectAllBtn);
+                    controls.appendChild(deselectAllBtn);
+
+                    // Create controls for toggling columns
+                    keys.forEach(key => {
+                        let label = document.createElement("label");
+                        let checkbox = document.createElement("input");
+                        checkbox.type = "checkbox";
+                        checkbox.checked = Boolean(columnVisibility[key]);
+                        checkbox.dataset.key = key;
+                        checkbox.addEventListener('change', () => {
+                            columnVisibility[key] = checkbox.checked;
+                            let index = keys.indexOf(key);
+                            let th = thead.children[index];
+                            let tds = tbody.querySelectorAll(`td:nth-child(${index + 1})`);
+                            th.style.display = checkbox.checked ? '' : 'none';
+                            tds.forEach(td => td.style.display = checkbox.checked ? '' : 'none');
+                        });
+                        label.appendChild(checkbox);
+                        label.appendChild(document.createTextNode(key));
+                        controls.appendChild(label);
+                    });
+                    
+                    // Update table headers
+                    keys.forEach(key => {
+                        let th = document.createElement("th");
+                        th.textContent = key;
+                        th.style.display = columnVisibility[key] ? '' : 'none';
+                        thead.appendChild(th);
+                    });
+                    
+                    // Add rows for logs (current page, reversed)
+                    pageLogs.reverse().forEach(log => {
+                        let tr = document.createElement("tr");
+                        keys.forEach(key => {
+                            let td = document.createElement("td");
+                            let value = getValue(log, key);
+                            if (value === null || value === undefined) {
+                                td.textContent = '';
+                            } else if (typeof value === 'object') {
+                                // Format objects nicely with indentation
+                                let pre = document.createElement("pre");
+                                pre.style.margin = '0';
+                                pre.style.fontSize = 'smaller';
+                                pre.textContent = JSON.stringify(value, null, 2);
+                                td.appendChild(pre);
+                            } else {
+                                td.textContent = value;
+                            }
+                            td.style.display = columnVisibility[key] ? '' : 'none';
+                            tr.appendChild(td);
+                        });
+                        tbody.appendChild(tr);
+                    });
+                })
+                .catch(err => console.error('Error fetching logs:', err));
         }
         setInterval(fetchLogs, 2000); // every 2 seconds
         fetchLogs();
+
+        // Toggle controls visibility
+        document.getElementById('toggleControls').addEventListener('click', () => {
+            let controls = document.getElementById('controls');
+            if (controls.style.display === 'none') {
+                controls.style.display = 'block';
+                document.getElementById('toggleControls').textContent = 'Hide Field Visibility';
+            } else {
+                controls.style.display = 'none';
+                document.getElementById('toggleControls').textContent = 'Show Field Visibility';
+            }
+        });
     </script>
 </body>
 </html>
